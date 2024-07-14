@@ -1,22 +1,22 @@
-Зачем корутины?
+# Зачем корутины/сопрограммы?
 
-Все* мы хотим** писать такой код:
+## Все мы хотим писать такой код:
 ```cpp
 task<> tcp_echo_server(tcp::socket socket)
 {
     char data[1024];
     while (true) {
-        std::size_t n = co_await socket->async_read_some(asio::buffer(data), asio::use_awaitable);
-        co_await async_write(*socket, asio::buffer(data, n));
+        auto n = co_await socket.async_read_some(buffer(data), use_awaitable);
+        co_await async_write(socket, buffer(data, n));
     }
 }
 ```
-К сожалению приходится писать следующее:
+## К сожалению или счастью приходится писать чтото в духе:
 ```cpp
-struct EchoServer : std::enable_shared_from_this<EchoServer> {
+class EchoServer : std::enable_shared_from_this<EchoServer> {
     char buff[1024];
     tcp::socket sock;
-
+public:
     EchoServer(tcp::socket sock) : sock(std::move(sock)) {}
     void Start() {
         read();
