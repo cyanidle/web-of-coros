@@ -75,6 +75,8 @@ struct task {
 task async_run(string request) {
     promise prom;
     auto future = prom.get_return_object();
+    // Стоит обратить внимание, что promise_type у нас получился копируемым, что
+    // обычно делать не стоит!
     run(request, [prom](auto ok, string result){
         if (ok) {
             prom.return_value(std::move(result));

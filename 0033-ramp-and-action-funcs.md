@@ -80,7 +80,7 @@ ReturnValue Foo(Args&&... args)
     // ramp-fucntion (создание и инициализация) и 
     // action-function (пользовательская стейт-машина) соответственно
     void couroutine_states(coroutine_frame*);
-    couroutine_states(frame);
+    couroutine_states(frame); //Первый вызов
 
     // 7.
     // Возвращаем результат вызывающей стороне, 
