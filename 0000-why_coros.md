@@ -11,7 +11,7 @@ task<> tcp_echo_server(tcp::socket socket)
     }
 }
 ```
-## К сожалению или счастью приходится писать чтото в духе:
+## К сожалению или счастью приходится писать следующее:
 ```cpp
 class EchoServer : std::enable_shared_from_this<EchoServer> {
     char buff[1024];
@@ -24,13 +24,19 @@ public:
 private:
     void read() {
         async_read(sock, buffer(buff), [self = shared_from_this()](auto ec, size_t read){
-            if (ec) ...;
+            if (ec) {
+                //todo!
+                return; //cannot throw here
+            }
             self->write(read);
         });
     }
     void write(size_t amount) {
         async_write(sock, buffer(buff, amount), [self = shared_from_this()](auto ec, size_t){
-            if (ec) ...;
+            if (ec) {
+                //todo!
+                return; //cannot throw here
+            }
             self->read();
         });
 
