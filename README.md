@@ -84,14 +84,12 @@ private:
 
 И такой код может вполне быть успешным полезным. Я сам считаю что это оптимальный вариант при написании чего то низкоуровневого. Но при написании именно бизнес-логики, а не инфраструктуры иногда удобней использовать модель `async\await`. Самые болезненные случаи будут рассмотрены дальше
 
-++ Добавить обоснования из пейпера Корутин ТС
+//TODO: Добавить обоснования из пейпера Корутин ТС
 
 Для того чтобы начать понимание того, как все таки использовать корутины, а также интегрировать чужие начнем с простого - создадим обертку для следующей функции.
 
 ```cpp
-using Callback = std::function<void(bool ok, string result)>;
-
-void run(string request, Callback cb);
+void run(string request, std::function<void(bool ok, string result)> cb);
 
 ??? run_async(string request) {
     ???
@@ -128,6 +126,8 @@ struct task {
 ## Создаем свою имплементацию
 
 ### Представим, что мы имеем следующее асинхронное Апи
+
+Что-то в духе Redis
 ```cpp
 // ok == false => result contains exception msg
 void run(string request, std::function<void(bool ok, string result)> cb);
@@ -144,17 +144,24 @@ void run(string request, std::function<void(bool ok, string result)> cb);
 #include <memory>
 
 using std::string;
+```
 
+```cpp
 void run(string request, std::function<void(bool ok, string result)> cb);
 void log(string msg);
-
+```
+Напишем наши корутины следующим образом: все состояние одной асинхронной транзакции будет общим 
+между `promise` (передающая сторона) и `task` (принимающая сторона)
+```cpp
 struct state {
     bool done = false;
     std::exception_ptr exc;
     string result;
     std::coroutine_handle<> handle = {}; //type-erased
 };
-
+```
+Для начала мы напишем `promise`. Фактически `handle` для передачи принимающей стороне результата асинхронного вычисления
+```cpp
 struct promise {
     std::shared_ptr<state> s = std::make_shared<state>();
     auto initial_suspend() {
@@ -184,7 +191,8 @@ struct promise {
         }
     }
 };
-
+```
+```cpp
 struct task {
     std::shared_ptr<state> s;
     using promise_type = promise;
@@ -205,7 +213,8 @@ struct task {
         }
     }
 };
-
+```
+```cpp
 // Клей со старым кодом!
 task async_run(string request) {
     promise prom;
@@ -221,8 +230,9 @@ task async_run(string request) {
     });
     return future;
 }
-
-
+```
+Ну и наконец!
+```cpp
 task async_main() {
     while (true) {
         auto pong = co_await async_run("ping");
@@ -234,22 +244,48 @@ task async_main() {
 ### Возьмем теперь что-то более реалистичное!
 ```cpp
 
-// Клей со старым кодом!
-task async_run(string request) {
+typedef void(*Callback)(void* data, const char* responce, bool ok); // Нам даже не пожалели typedef!
+void run(const char* request, Callback callback, void* data);
+
+```
+Теперь `async_run` будет выглядеть следующим образом
+```cpp
+namespace detail {
+
+struct Context {
+    promise prom;
+};
+
+void callback(void* data, const char* responce, bool ok) {
+
+}
+
+}
+
+task async_run(string const& request) {
     promise prom;
     auto future = prom.get_return_object();
-    // Стоит обратить внимание, что promise_type у нас получился копируемым, что
-    // обычно делать не стоит!
-    run(request, [prom](auto ok, string result){
-        if (ok) {
-            prom.return_value(std::move(result));
-        } else {
-            prom.set_error(std::make_exception_ptr(std::runtime_error(std::move(result))));
-        }
-    });
+    run(request.c_str(), detail::callback, new Context{prom});
     return future;
 }
 ```
+Чуть более реалистичная версия
+```cpp
+task async_run(string const& request) {
+    promise prom;
+    auto future = prom.get_return_object();
+    auto ctx = new Context{prom};
+    auto status = run(request.c_str(), detail::callback, ctx);
+    if (status == MY_BAD_STATUS) {
+        ctx->prom.set_error(std::make_exception_ptr(std::runtime_error("bad status")));
+        delete ctx;
+    }
+    return future;
+}
+```
+### А мне и на коллбеках хорошо!
+
+// TODO: "чейнинг коллбеков"
 
 ## Под капотом
 ```cpp
@@ -372,6 +408,48 @@ void couroutine_states(coroutine_frame* frame)
 final_suspend:
     co_await promise.final_suspend();
 }
+```
+
+## Польза!
+
+### Callback hell
+Нет не такой
+```cpp
+do()
+    .Then([]{
+        return nextStep();
+    })
+    .Then([]{
+        return lastStep();
+    });
+```
+А примерно такой:
+```cpp
+void connect(T sock, T proxy) {
+    auto doConnect = [=]{
+        forward(sock, proxy);
+        forward(proxy, sock, true);
+    };
+    if (proxy->state() != Connected) {
+        WaitSignal(proxy, &QWebSocket::connected, sock, 5s)
+            .Then(fut::Sync, doConnect)
+            .Catch(fut::Sync, [](auto& e){
+                log("Achtung: {}!", e.what());
+            });
+    } else {
+        doConnect();
+    }
+}
+```
+```cpp
+return WaitSignal(ws, &QWebSocket::connected, ws, 5000).ThenSync([=](auto ok){
+    if (!ok) {
+        logErr("Could not create proxy connection for: {}", ws->objectName());
+        ws->deleteLater();
+    }
+    ok.get();
+    return fut::Resolved();
+});
 ```
 
 ## Undefined Behaviour (наше любимое)
