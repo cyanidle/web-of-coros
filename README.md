@@ -123,3 +123,364 @@ struct task {
 }
 ```
 
+// TODO: Концепт awaitable
+
+## Создаем свою имплементацию
+
+### Представим, что мы имеем следующее асинхронное Апи
+```cpp
+// ok == false => result contains exception msg
+void run(string request, std::function<void(bool ok, string result)> cb);
+```
+
+### Силой 20-х плюсов и священного комитета сварим следующий сниппет
+```cpp
+#include <string>
+#include <functional>
+#include <coroutine>
+#include <stdexcept>
+#include <optional>
+#include <concepts>
+#include <memory>
+
+using std::string;
+
+void run(string request, std::function<void(bool ok, string result)> cb);
+void log(string msg);
+
+struct state {
+    bool done = false;
+    std::exception_ptr exc;
+    string result;
+    std::coroutine_handle<> handle = {}; //type-erased
+};
+
+struct promise {
+    std::shared_ptr<state> s = std::make_shared<state>();
+    auto initial_suspend() {
+        return std::suspend_never{};
+    }
+    auto final_suspend() noexcept {
+        return std::suspend_never{};
+    }
+    auto get_return_object() {
+        return task{s};
+    }
+    void set_error(std::exception_ptr exc) {
+        s->exc = exc;
+        s->done = true;
+        if (s->handle) {
+            s->handle.resume();
+        }
+    }
+    auto unhandled_exception() {
+        set_error(std::current_exception());
+    }
+    void return_value(string result) {
+        s->result = std::move(result);
+        s->done = true;
+        if (s->handle) {
+            s->handle.resume();
+        }
+    }
+};
+
+struct task {
+    std::shared_ptr<state> s;
+    using promise_type = promise;
+    bool await_ready() {
+        return s->done;
+    }
+    // Хэндл вызывающей стороны!
+    // Параметр шаблона может отличаться!
+    // Поэтому используем стертую версию
+    void await_suspend(std::coroutine_handle<> h) {
+        s->handle = h;
+    }
+    string await_resume() {
+        if (s->exc) {
+            std::rethrow_exception(s->exc);
+        } else {
+            return std::move(s->result);
+        }
+    }
+};
+
+// Клей со старым кодом!
+task async_run(string request) {
+    promise prom;
+    auto future = prom.get_return_object();
+    // Стоит обратить внимание, что promise_type у нас получился копируемым, что
+    // обычно делать не стоит!
+    run(request, [prom](auto ok, string result){
+        if (ok) {
+            prom.return_value(std::move(result));
+        } else {
+            prom.set_error(std::make_exception_ptr(std::runtime_error(std::move(result))));
+        }
+    });
+    return future;
+}
+
+
+task async_main() {
+    while (true) {
+        auto pong = co_await async_run("ping");
+        log(pong);
+    }
+}
+```
+
+### Возьмем теперь что-то более реалистичное!
+```cpp
+
+// Клей со старым кодом!
+task async_run(string request) {
+    promise prom;
+    auto future = prom.get_return_object();
+    // Стоит обратить внимание, что promise_type у нас получился копируемым, что
+    // обычно делать не стоит!
+    run(request, [prom](auto ok, string result){
+        if (ok) {
+            prom.return_value(std::move(result));
+        } else {
+            prom.set_error(std::make_exception_ptr(std::runtime_error(std::move(result))));
+        }
+    });
+    return future;
+}
+```
+
+## Под капотом
+```cpp
+// Примерная организация кадра сопрограммы.
+// Здесь отражены наиболее важные для понимая части
+// 1. resume - указатель на функцию, 
+//    которая вызывается при передаче управления сопрограмме, описывает стейт-машину.
+// 2. promise - объект типа Promise
+// 3. state - текущее состояние
+// 4. heap_allocated - был ли фрейм при создание размещен в куче
+//    или фрейм был создан на стеке вызывающей стороны
+// 5. args - аргументы вызова сопрограммы
+// 6. locals - сохраненные локальные переменные текущего состояния
+// ...
+struct coroutine_frame
+{
+    void (*resume)(coroutine_frame *);
+    promise_type promise;
+    int16_t state;
+    bool heap_allocated;
+    // args
+    // locals
+    //...
+};
+
+// 1. Создание и инициализация кадра сопрограммы. Инициация выполнения.
+template<typename ReturnValue, typename ...Args>
+ReturnValue Foo(Args&&... args)
+{
+    // 1.
+    // Определяем тип Promise
+    using coroutine_traits = std::coroutine_traits<ReturnValue, Args...>;
+    using promise_type = typename coroutine_traits::promise_type;
+
+    // 2.
+    // Создание кадра сопрограммы. 
+    // Размер кадра определяется встроенными средствами компилятора
+    // и зависит от размера объекта Promise, количества и размера локальных переменных
+    // и аргументов, и набора вспомогательных данных,
+    // необходимых для управления состоянием сопрограммы.
+    // 1. Если тип promise_type имеет статический метод
+    //    get_return_object_on_allocation_failure,
+    //    то вызывается версия оператора new, не генерирующая исключений
+    //    и в случае неудачи вызывается метод get_return_object_on_allocation_failure,
+    //    результат вызова возвращается вызывающей стороне.
+    // 2. Иначе вызывается обычная версия оператора new.
+    coroutine_frame* frame = nullptr;
+    if constexpr (has_static_get_return_object_on_allocation_failure_v<promise_type>)
+    {
+        frame = reinterpret_cast<coroutine_frame*>(
+            operator new(__builtin_coro_size(), std::nothrow));
+        if(!frame)
+            return promise_type::get_return_object_on_allocation_failure();
+    }
+    else
+    {
+        frame = reinterpret_cast<coroutine_frame*>(operator new(__builtin_coro_size()));
+    }
+
+    // 3.
+    // Сохраняем переданные функции аргументы во фрейме.
+    // Аргументы переданные по значению перемещаются.
+    // Аргументы переданные по ссылке (lvalue и rvalue) сохраняют ссылочную семантику.
+    <move-args-to-frame>
+
+    // 4.
+    // Создаем объект типа promise_type и сохраняем его во фрейме
+    new(&frame->promise) create_promise<promise_type>(<frame-lvalue-args>);
+
+    // 5.
+    // Вызываем метод Promise::get_return_object().
+    // Результат вычисления будет возвращен вызывающей стороне
+    // при достижение первой точки остановки и передачи потока управления.
+    // Результат сохраняется как локальная переменная до вызова тела функции,
+    // т.к. фрейм сопрограммы может быть удален (см. оператор co_await).
+    auto return_object = frame->promise.get_return_object();
+
+    // 6.
+    // Вызываем функцию описывающую стейт-машину согласно 
+    // пользовательским запросам передачи управления
+    // В реализации GCC, например, эти две функции называются
+    // ramp-fucntion (создание и инициализация) и 
+    // action-function (пользовательская стейт-машина) соответственно
+    void couroutine_states(coroutine_frame*);
+    couroutine_states(frame); //Первый вызов
+
+    // 7.
+    // Возвращаем результат вызывающей стороне, 
+    // мы достигнем этой точки в коде только при первом вызове,
+    // все последующие запросы на возобновление работы будут вызывать функцию
+    // стейт-машины couroutine_states, указатель на функцию сохранен во фрейме сопрограммы.
+    return return_object;
+}
+```
+
+
+```cpp
+void couroutine_states(coroutine_frame* frame)
+{
+    switch(frame->state)
+    {
+        case 0:
+        ... goto resume_point_0;
+        case N:
+            goto resume_point_N;
+        ...
+    }
+
+    co_await promise.initial_suspend();
+
+    try
+    {
+        // function body
+    }
+    catch(...)
+    {
+        promise.unhandled_exception();
+    }
+
+final_suspend:
+    co_await promise.final_suspend();
+}
+```
+
+## Undefined Behaviour (наше любимое)
+
+### Простые случаи
+```cpp
+// assuming that task is some coroutine task type
+task<void> f() {
+    // not a coroutine, undefined behavior
+}
+ 
+task<void> g() {
+    co_return;  // OK
+}
+ 
+task<void> h() {
+    co_await g();
+    // OK, implicit co_return;
+}
+```
+
+### Реалистично опасные
+```cpp
+// Bad!!!
+task coro(const std::vector<int>& data)
+{
+    co_await sleep(10s);
+    // data is dangling here
+    for(const auto& value : data)
+        std::cout << value << std::endl;
+}
+```
+
+```cpp
+// OK!
+task coro(const std::vector<int>& data)
+{
+    co_await sleep(10s);
+    // data is dangling here
+    for(const auto& value : data)
+        std::cout << value << std::endl;
+}
+```
+// TODO?
+
+## Lifetime issues
+
+Но подобные проблемы легко найти и исправить. Их последствия проявляются практически сразу и очевидно.
+Настоящие проблемы с корутинами могу возникнуть в изза слабой связанности вызываемого асинхронного кода и 
+вызывающей стороны (что конечно и хорошо). 
+
+```cpp
+
+task<void> some_func();
+
+struct Action {
+    Action(string data);
+    task<void> run() {
+        // ok
+        co_await some_func();
+        // is Action alive here? Who can tell...
+    }
+};
+
+```
+
+Поэтому нашему классу `task<T>` понадобится некий способ остановить исполнения и не вызываеть `handle.resume()`.
+И это мы еще не синхронизируем взаимодействие между потоков. Корутины чисто в одном потоке уже удобны
+
+## Execution context
+
+// TODO
+
+### Их можно объединить!
+
+
+// TODO
+
+## Отменяемость
+
+// TODO
+
+## promise.await_transform
+
+Пример применения await_transform
+```cpp
+folly::coro::Task<int> task42Slow() {
+  // This doesn't suspend the coroutine, just extracts the Executor*
+  folly::Executor* startExecutor = co_await folly::coro::co_current_executor;
+  co_await folly::futures::sleep(std::chrono::seconds{1});
+  folly::Executor* resumeExecutor = co_await folly::coro::co_current_executor;
+  CHECK_EQ(startExecutor, resumeExecutor);
+}
+```
+
+## Компиляция
+
+Глобальные настройи для вкелючения корутин
+```cmake
+if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fcoroutines-ts")
+elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fcoroutines")
+elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
+    set(CMAKE_CXX_STANDARD 20)
+endif()
+```
+
+### Боль на астре
+// TODO
