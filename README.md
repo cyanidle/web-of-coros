@@ -49,38 +49,20 @@ private:
 
 Мелвин Эдвард Конвей - американский ученый-компьютерщик, программист и хакер, который придумал то, что сейчас известно как закон Конвея: "Организации, разрабатывающие системы, вынуждены создавать проекты, которые являются копиями коммуникационных структур этих организаций". 
 
-Помимо вышеперечисленного, Конвей, пожалуй, наиболее известен благодаря разработке концепции сопрограмм. Конвей ввел термин "сопрограмма" в 1958 году и был первым, кто применил эту концепцию к программе сборки. Позже он написал основополагающую статью на тему сопрограмм под названием "Design of a Separable Transition-diagram".
+Помимо вышеперечисленного, Конвей, пожалуй, наиболее известен благодаря разработке концепции сопрограмм. Конвей ввел термин "сопрограмма" в 1958 году и был первым, кто применил эту концепцию. Позже он написал основополагающую статью на тему сопрограмм под названием "Design of a Separable Transition-diagram".
 
-> Описанные алгоритмы были проверены на компьютере, с памятью в 5000 машинных слов
+TODO: https://habrastorage.org/webt/1o/v4/-v/1ov4-vv40pxmehwic63rgzvr5qq.jpeg
 
-> Рисунок 3 иллюстрирует суть разделимости. Вместо 
-того, чтобы модули A и B взаимодействовали как сопрограммы
-со связью сопрограмм между операторами записи в A
-и операторами чтения в B, так что управление передается туда
-и обратно один раз при каждой передаче элемента, возможно, не изменяя ничего в A или B, кроме связей чтения и
-записи, иметь функцию записи в A и B. все его элементы на ленте a, чтобы
-перемотать ленту назад и затем попросить B прочитать все элементы с
-ленты. Таким образом, в этом смысле пара программ A и B
-может работать как однопроходный или двухпроходный процессор с
-только тривиальная модификация
+## Stackless vs Stackfull
 
-> Тем свойством конструкции, которое делает ее пригодной для
-многих сегментных конфигураций, является ее разделяемость. Программная
-организация является разделимой, если она разбита на
-модули обработки, которые взаимодействуют друг с другом в соответствии со
-следующими ограничениями: 
-
-1) единственная связь между модулями осуществляется в виде отдельных элементов информации (сообщений) 
-2) поток каждого из этих элементов осуществляется по фиксированным односторонним путям 
-3) вся программа может быть построена таким образом, что входные данные находятся в крайнем левом углу, выходные - в крайнем левом верхнем углу. крайний правый элемент и все, что находится между ними, все информационные элементы, передаваемые между модулями, имеют движение вправо.
-
+TODO
 
 ## C++20
 
 Представим сферический проект в вакууме на libuv/Qt или
 любом другом фреймворке/библиотеке с асинхроным eventloop.
 
-Чаще всего для индикации завершения операции в высокоуровневых асинхронных рантаймах используется callback функция. Детали не так важны, передается ли некий `void* data` или используется полноценное стирание типов на плюсах или это простой `std::function<>`
+Чаще всего для индикации завершения операции в высокоуровневых асинхронных рантаймах используется callback функция. Детали не так важны, передается ли некий `void* data` или используется полноценное стирание типов (как например `std::function<>`)
 
 И такой код может вполне быть успешным полезным. Я сам считаю что это оптимальный вариант при написании чего то низкоуровневого. Но при написании именно бизнес-логики, а не инфраструктуры иногда удобней использовать модель `async\await`. Самые болезненные случаи будут рассмотрены дальше
 
@@ -113,21 +95,26 @@ struct task {
         std::suspend_always initial_suspend() noexcept { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
 
+        // these can return awaitable themselves (TODO: check)
         void return_value(T&& result) {} // Либо эта версия
         void return_void() {} // Либо эта
 
-        void unhandled_exception() {} // вызывается внутри catch() блока.
+        void unhandled_exception() {} // вызывается внутри catch-блока.
     }
 }
 ```
-
-// TODO: Концепт awaitable
+```cpp
+struct awaitable {
+    bool await_ready();
+    bool await_ready();
+};
+```
 
 ## Создаем свою имплементацию
 
 ### Представим, что мы имеем следующее асинхронное Апи
 
-Что-то в духе Redis
+Аля Redis
 ```cpp
 // ok == false => result contains exception msg
 void run(string request, std::function<void(bool ok, string result)> cb);
@@ -150,6 +137,11 @@ using std::string;
 void run(string request, std::function<void(bool ok, string result)> cb);
 void log(string msg);
 ```
+
+Цель - написать полностью имплементацию для:
+```cpp
+task async_run(string request) ;
+```
 Напишем наши корутины следующим образом: все состояние одной асинхронной транзакции будет общим 
 между `promise` (передающая сторона) и `task` (принимающая сторона)
 ```cpp
@@ -158,6 +150,10 @@ struct state {
     std::exception_ptr exc;
     string result;
     std::coroutine_handle<> handle = {}; //type-erased
+
+    ~state() {
+        if (handle) handle.destroy();
+    }
 };
 ```
 Для начала мы напишем `promise`. Фактически `handle` для передачи принимающей стороне результата асинхронного вычисления
@@ -256,12 +252,18 @@ struct Context {
     promise prom;
 };
 
-void callback(void* data, const char* responce, bool ok) {
-
+inline void callback(void* data, const char* responce, bool ok) {
+    auto* ctx = static_cast<Context*>(data);
+    if (ok) {
+        ctx->prom(responce); // promise_type::set_value() should be noexcept
+    } else {
+        ctx->prom(std::make_exception_ptr(std::runtime_error(responce)));
+    }
+    delete ctx;
 }
-
 }
-
+```
+```cpp
 task async_run(string const& request) {
     promise prom;
     auto future = prom.get_return_object();
@@ -269,7 +271,7 @@ task async_run(string const& request) {
     return future;
 }
 ```
-Чуть более реалистичная версия
+Или так
 ```cpp
 task async_run(string const& request) {
     promise prom;
@@ -283,10 +285,6 @@ task async_run(string const& request) {
     return future;
 }
 ```
-### А мне и на коллбеках хорошо!
-
-// TODO: "чейнинг коллбеков"
-
 ## Под капотом
 ```cpp
 // Примерная организация кадра сопрограммы.
@@ -310,7 +308,8 @@ struct coroutine_frame
     // locals
     //...
 };
-
+```
+```cpp
 // 1. Создание и инициализация кадра сопрограммы. Инициация выполнения.
 template<typename ReturnValue, typename ...Args>
 ReturnValue Foo(Args&&... args)
@@ -319,7 +318,6 @@ ReturnValue Foo(Args&&... args)
     // Определяем тип Promise
     using coroutine_traits = std::coroutine_traits<ReturnValue, Args...>;
     using promise_type = typename coroutine_traits::promise_type;
-
     // 2.
     // Создание кадра сопрограммы. 
     // Размер кадра определяется встроенными средствами компилятора
@@ -344,7 +342,6 @@ ReturnValue Foo(Args&&... args)
     {
         frame = reinterpret_cast<coroutine_frame*>(operator new(__builtin_coro_size()));
     }
-
     // 3.
     // Сохраняем переданные функции аргументы во фрейме.
     // Аргументы переданные по значению перемещаются.
@@ -413,9 +410,9 @@ final_suspend:
 ## Польза!
 
 ### Callback hell
-Нет не такой
+Not really
 ```cpp
-do()
+action()
     .Then([]{
         return nextStep();
     })
@@ -423,8 +420,11 @@ do()
         return lastStep();
     });
 ```
-А примерно такой:
+### Условия
+manual `awaitable.await_ready()`
 ```cpp
+using namespace std::chrono_literals;
+
 void connect(T sock, T proxy) {
     auto doConnect = [=]{
         forward(sock, proxy);
@@ -432,8 +432,8 @@ void connect(T sock, T proxy) {
     };
     if (proxy->state() != Connected) {
         WaitSignal(proxy, &QWebSocket::connected, sock, 5s)
-            .Then(fut::Sync, doConnect)
-            .Catch(fut::Sync, [](auto& e){
+            .ThenSync(doConnect)
+            .CatchSync([](std::exception& e){
                 log("Achtung: {}!", e.what());
             });
     } else {
@@ -442,15 +442,127 @@ void connect(T sock, T proxy) {
 }
 ```
 ```cpp
-return WaitSignal(ws, &QWebSocket::connected, ws, 5000).ThenSync([=](auto ok){
-    if (!ok) {
-        logErr("Could not create proxy connection for: {}", ws->objectName());
-        ws->deleteLater();
+Future<void> connect(QWebSocket* sock, QWebSocket* proxy) {
+    auto doConnect = [=]{
+        forward(sock, proxy);
+        forward(proxy, sock, true);
+    };
+    if (proxy->state() != Connected) {
+        co_await WaitSignal(proxy, &QWebSocket::connected, sock, 5s);
+    } else {
+        doConnect();
     }
-    ok.get();
-    return fut::Resolved();
-});
+}
 ```
+```cpp
+Future<void> connect(QWebSocket* sock, QWebSocket* proxy) {
+    if (proxy->state() != Connected) {
+        co_await WaitSignal(proxy, &QWebSocket::connected, sock, 5s);
+    }
+    forward(sock, proxy);
+    forward(proxy, sock, true);
+}
+```
+### try-catch
+```cpp
+Future<void> func(QWebSocket* ws) {
+    // ...
+    return WaitSignal(ws, &QWebSocket::connected, ws, 5000).ThenSync([=](auto ok){
+        if (!ok) {
+            logErr("Ws error in: {}", ws->objectName());
+            ws->deleteLater();
+        }
+        ok.get();
+        return fut::Resolved();
+    });
+}
+```
+```cpp
+Future<void> func(QWebSocket* ws) {
+    // ...
+    try {
+        co_await WaitSignal(ws, &QWebSocket::connected, ws, 5000);
+    } catch (...) {
+        logErr("Ws error in: {}", ws->objectName());
+        ws->deleteLater();
+        throw;
+    }
+}
+```
+
+### Длинная последовательность действий
+```cpp
+Session sess;
+Session::Impl* d = sess.d.get();
+//...
+//...
+return WaitSignal(d->ws, &QWebSocket::connected, d->ws, 5000)
+    .ThenSync([d]{
+        return d->initSession();
+    })
+    .ThenSync([d](Session result){
+        return d->handleSession(result);
+    })
+    .ThenSync([MV(sess)]() mutable { //forced to use mutable lambda
+        // const-correctnes in callback hell is pretty difficult!
+        return std::move(sess);
+    });
+```
+```cpp
+Session sess;
+//...
+//...
+co_await WaitSignal(sess.d->ws, &QWebSocket::connected, sess.d->ws, 5000);
+auto result = co_await sess.d->initSession();
+co_await sess.d->handleSession(result);
+co_return sess; //auto move
+```
+
+### Циклы
+```cpp
+Future<void> FileSystemCache::Cleanup(const cache::CleanupParams &params) try {
+    Dirs dirs;
+    auto iter = std::filesystem::recursive_directory_iterator(cacheDir);
+    auto end = std::filesystem::recursive_directory_iterator();
+    for (;iter != end; ++iter) {
+        if (iter->is_directory()) {
+            size_t depth = size_t(iter.depth());
+            if (dirs.size() <= depth) {
+                dirs.resize(depth + 1);
+            }
+            dirs[depth].push_back(Path(iter->path()));
+        }
+    }
+    if (!dirs.empty()) {
+        return populateCleanups(params, dirs);
+    } else {
+        return fut::Resolved();
+    }
+} catch (...) {
+    return fut::Rejected<void>(std::current_exception());
+}
+```
+```cpp
+static Future<void> populateCleanups(cache::CleanupParams params, Dirs& dirs) {
+    assert(!dirs.empty());
+    auto level = std::move(dirs.back());
+    dirs.pop_back();
+    std::vector<Future<void>> levelFuts;
+    for (auto& dir: level) {
+        levelFuts.push_back(doCleanup(params, dir));
+    }
+    return Gather(std::move(levelFuts))
+        .Then(fut::Sync, [MV(dirs), MV(params)]() mutable {
+            if (dirs.empty()) {
+                return fut::Resolved();
+            } else {
+                return populateCleanups(params, dirs);
+            }
+        });
+}
+```
+
+
 
 ## Undefined Behaviour (наше любимое)
 
@@ -482,24 +594,22 @@ task coro(const std::vector<int>& data)
         std::cout << value << std::endl;
 }
 ```
-
 ```cpp
 // OK!
-task coro(const std::vector<int>& data)
+task coro(const std::vector<int>& _data)
 {
+    auto data = _data;
     co_await sleep(10s);
-    // data is dangling here
     for(const auto& value : data)
         std::cout << value << std::endl;
 }
 ```
-// TODO?
 
 ## Lifetime issues
 
 Но подобные проблемы легко найти и исправить. Их последствия проявляются практически сразу и очевидно.
-Настоящие проблемы с корутинами могу возникнуть в изза слабой связанности вызываемого асинхронного кода и 
-вызывающей стороны (что конечно и хорошо). 
+Настоящие проблемы с корутинами могут возникнуть в изза слабой связанности вызываемого асинхронного кода и 
+вызывающей стороны (связаны они только через `coroutine_type` и `awaitable`, который он порождает). 
 
 ```cpp
 
@@ -525,7 +635,6 @@ struct Action {
 
 ### Их можно объединить!
 
-
 // TODO
 
 ## Отменяемость
@@ -542,6 +651,76 @@ folly::coro::Task<int> task42Slow() {
   co_await folly::futures::sleep(std::chrono::seconds{1});
   folly::Executor* resumeExecutor = co_await folly::coro::co_current_executor;
   CHECK_EQ(startExecutor, resumeExecutor);
+}
+```
+```cpp
+//...
+  template <typename Awaitable>
+  auto await_transform(NothrowAwaitable<Awaitable>&& awaitable) {
+    bypassExceptionThrowing_ = BypassExceptionThrowing::REQUESTED;
+    return await_transform(awaitable.unwrap());
+  }
+  auto await_transform(folly::coro::co_current_executor_t) noexcept {
+    return ready_awaitable<folly::Executor*>{executor_.get()};
+  }
+```
+
+
+### coroutine_handle.pointer()
+Универсальный способ, если мы не управляем кодом promise. Минус - оверхед от `suspend`
+```cpp
+struct co_get_handle
+{
+    std::coroutine_handle<> _handle;
+    bool await_ready() const noexcept { return false; } //sleep
+    bool await_suspend(std::coroutine_handle<> handle) noexcept { _handle = handle; return false; } //get handle and continue
+    std::coroutine_handle<> await_resume() noexcept { return _handle; }
+};
+```
+```cpp
+inline void callback(void* data, const char* responce, bool ok) {
+    auto* ctx = static_cast<Context*>(data);
+    if (ok) {
+        ctx->prom(responce); // promise_type::set_value() should be noexcept
+    } else {
+        ctx->prom(std::make_exception_ptr(std::runtime_error(responce)));
+    }
+    delete ctx;
+}
+task async_run(string const& request) {
+    auto self = co_await co_get_handle();
+    auto future = prom.get_return_object();
+    run(request.c_str(), detail::callback, new Context{prom});
+    co_return future;
+}
+```
+
+### Suspend-less way (more verbose and intrusive)
+Универсальный способ, если мы не управляем кодом promise. Минус - оверхед от `suspend`
+```cpp
+struct co_get_handle {};
+struct promise
+{
+    // ...
+    std::couroutine_handle<promise> await_transform(co_get_handle) {
+        return std::couroutine_handle<promise>::from_promise(*this)
+    }
+};
+// ACHTUNG: https://stackoverflow.com/questions/76110225/why-is-promise-typeawait-transform-greedy
+```
+```cpp
+inline void callback(void* data, const char* responce, bool ok) {
+    auto self = std::coroutine_handle<task::promise_type>::from_pointer(data);
+    auto& prom = self.promise();
+    if (ok) {
+        prom(responce);
+    } else {
+        prom(std::make_exception_ptr(std::runtime_error(responce)));
+    }
+}
+task async_run(string const& request) {
+    auto self = co_await co_get_handle();
+    run(request.c_str(), detail::callback, self.pointer());
 }
 ```
 
@@ -561,4 +740,22 @@ endif()
 ```
 
 ### Боль на астре
-// TODO
+
+- Хочу корутины
+- astra 1.7 target...
+- look inside
+- gcc8
+- sad.png
+- clang14 (TODO: check)
+- ща все врубим
+- libstdc++ от gcc8
+- sad2.png
+- dual-stdlibs in project moment
+
+
+## Готовые решения
+
+* asio!
+* folly?
+* qcoro!
+* https://github.com/andreasbuhr/cppcoro!?
