@@ -2,18 +2,8 @@
 
 ## Зачем
 
-### Все мы хотим писать такой код:
-```cpp
-task<> tcp_echo_server(tcp::socket socket)
-{
-    char data[1024];
-    while (true) {
-        auto n = co_await socket.async_read_some(buffer(data), use_awaitable);
-        co_await async_write(socket, buffer(data, n));
-    }
-}
-```
-### К сожалению или счастью приходится писать следующее:
+### К сожалению или счастью
+При работе с асинхроным кодом приходится писать следующее
 ```cpp
 class EchoServer : std::enable_shared_from_this<EchoServer> {
     char buff[1024];
@@ -27,7 +17,7 @@ private:
     void read() {
         async_read(sock, buffer(buff), [self = shared_from_this()](auto ec, size_t read){
             if (ec) {
-                //todo!
+                //handle_error()
                 return; //cannot throw here
             }
             self->write(read);
@@ -36,7 +26,7 @@ private:
     void write(size_t amount) {
         async_write(sock, buffer(buff, amount), [self = shared_from_this()](auto ec, size_t){
             if (ec) {
-                //todo!
+                //handle_error()
                 return; //cannot throw here
             }
             self->read();
@@ -45,6 +35,17 @@ private:
     }
 };
 ```
+### Все мы хотим писать такой код:
+```cpp
+task<> tcp_echo_server(tcp::socket socket)
+{
+    char data[1024];
+    while (true) {
+        auto n = co_await socket.async_read_some(buffer(data), use_awaitable);
+        co_await async_write(socket, buffer(data, n));
+    }
+}
+```
 ## Предыстория
 
 Мелвин Эдвард Конвей - американский ученый-компьютерщик, программист и хакер, который придумал то, что сейчас известно как закон Конвея: "Организации, разрабатывающие системы, вынуждены создавать проекты, которые являются копиями коммуникационных структур этих организаций". 
@@ -52,21 +53,72 @@ private:
 Помимо вышеперечисленного, Конвей, пожалуй, наиболее известен благодаря разработке концепции сопрограмм. Конвей ввел термин "сопрограмма" в 1958 году и был первым, кто применил эту концепцию. Позже он написал основополагающую статью на тему сопрограмм под названием "Design of a Separable Transition-diagram".
 
 TODO: https://habrastorage.org/webt/1o/v4/-v/1ov4-vv40pxmehwic63rgzvr5qq.jpeg
+https://blog.skillfactory.ru/wp-content/uploads/2023/02/coroutine1-3919182.png
+
 
 ## Stackless vs Stackfull
 
-TODO
+
+### Stackful
+
+Стэкфул корутины очень похожи на потоки.
+Альтернативные нзвания: зеленые потоки, файберы
+
+В отличии от потоков их конкурентность называется **Кооперативной**, так как они
+управляются не ядром, которое может забрать управление в любой момент (по прерыванию, **Упреждающяя** конкурентность),
+а обычно управляются **Userspace** планировщиком.
+
+Также как и полноценные *настоящие* системные потоки они требуют от языка возможности сохранять контекст исполнения. Под
+стеком подразумеваются данные на стеке и регистры процессора.
+
+Необязательно все на одном физическом потоке (M/N)
+
+Приемущества:
+* В использовании очень похои на обычные треды без спец синтаксиса
+* Не требуют помощи компилятора
+
+Недостатки:
+* Дорогое переключение контекста
+* Невозможность* роста стэка
+
+Применения:
+* Boost.Coroutine(2)
+* Boost.Fiber
+* Userver
+* Golang
+* Java virtual threads
+* RTOS
+
+TODO: картинки!
+
+### Stackless
+
+Стэклесс корутины в своем названии и описывают основное приемущество перед стэклесс.
+Сохранение точки исполнения делается с помощью чуть ли не одной цифры.
+
+Преимущества:
+* Меньшее использование памяти
+* Не требует сохранения контекста
+* Гибкость (генераторы)
+
+Недостатки:
+* Требуют помощи от компилятора
+* Специальный синтаксис
+* На практике разбитые аллокации могут быть менее эффективные, чем одним блоком под весь стэк
+
+Применения:
+* Python asyncio
+* C++20
+* TODO: more
+
+TODO: картинки!
 
 ## C++20
 
-Представим сферический проект в вакууме на libuv/Qt или
-любом другом фреймворке/библиотеке с асинхроным eventloop.
-
-Чаще всего для индикации завершения операции в высокоуровневых асинхронных рантаймах используется callback функция. Детали не так важны, передается ли некий `void* data` или используется полноценное стирание типов (как например `std::function<>`)
+Чаще всего для индикации завершения операции используется callback функция. 
+Детали не так важны, передается ли некий `void* data` или используется полноценное стирание типов (как например `std::function<>`)
 
 И такой код может вполне быть успешным полезным. Я сам считаю что это оптимальный вариант при написании чего то низкоуровневого. Но при написании именно бизнес-логики, а не инфраструктуры иногда удобней использовать модель `async\await`. Самые болезненные случаи будут рассмотрены дальше
-
-//TODO: Добавить обоснования из пейпера Корутин ТС
 
 Для того чтобы начать понимание того, как все таки использовать корутины, а также интегрировать чужие начнем с простого - создадим обертку для следующей функции.
 
@@ -86,27 +138,42 @@ void run(string request, std::function<void(bool ok, string result)> cb);
 2) наличие внутреннего типа `promise_type` (или переопределение `std::coroutine_traits`)
 3) возможность получить из `coroutine_type` => `awaitable`
 
-Во первых это очень сжатые требования. Во вторых когда открываешь их самостоятельно помимо них видишь на `cppreference`
+```cpp
+coroutine my_function() {
+    co_return 1; // co_yield / co_await
+}
+```
 ```cpp
 template<typename T>
-struct task {
-    struct promise_type {
-        coroutine get_return_object() { return {coroutine::from_promise(*this)}; }
-        std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_always final_suspend() noexcept { return {}; }
+struct coroutine {
+    using promise_type = promise;
+    awaitable operator co_await(); // Либо сам является awaitable
+}
+```
+```cpp
+struct promise {
+    coroutine get_return_object();
+    awaitable initial_suspend() noexcept;
+    awaitable final_suspend() noexcept;
 
-        // these can return awaitable themselves (TODO: check)
-        void return_value(T&& result) {} // Либо эта версия
-        void return_void() {} // Либо эта
+    // these can return awaitable themselves (TODO: check)
+    void return_value(T&& result) {} // Либо эта версия
+    void return_void() {} // Либо эта
 
-        void unhandled_exception() {} // вызывается внутри catch-блока.
-    }
+    void unhandled_exception() {} // вызывается внутри catch-блока.
+
+    // Advanced:
+    T await_transform(<expr>);
+    static coroutine get_return_object_on_allocation_failure();
+    void* operator new(std::size_t n) noexcept;
+    awaitable yield_value(T&& value);
 }
 ```
 ```cpp
 struct awaitable {
     bool await_ready();
-    bool await_ready();
+    bool await_suspend();
+    T await_resume(); // may throw exceptions
 };
 ```
 
@@ -120,8 +187,28 @@ struct awaitable {
 void run(string request, std::function<void(bool ok, string result)> cb);
 ```
 
+```cpp
+void doMultiStepTask(std::function<void(bool ok)> callback) {
+    run("GET key", [=](bool ok, string result){
+        if (!ok) {
+            handle_error(result);
+            return;
+        }
+        run("SET another", [=](bool ok, string result){
+            if (!ok) {
+                // <breakpoint>
+                // doMultiStepTask(std::__1::function<void, bool>)::<lambda1>::operator()(bool, std::basic_string<char>)::<lambda2>::operator()(bool, std::basic_string<char>)
+                handle_error(result);
+                return;
+            }
+        });
+    });
+}
+```
+
 ### Силой 20-х плюсов и священного комитета сварим следующий сниппет
 ```cpp
+// half-Slideware ahead
 #include <string>
 #include <functional>
 #include <coroutine>
@@ -234,6 +321,37 @@ task async_main() {
         auto pong = co_await async_run("ping");
         log(pong);
     }
+}
+```
+Напомню чего мы избегаем
++: явная стейт машина
+-: спаггети
+```cpp
+void async_main();
+namespace detail {
+
+void cb(bool ok, string result);
+void cb(bool ok, string result) {
+    if (ok) {
+        log(result);
+        async_main();
+    }
+}
+
+} //detail
+void async_main() {
+    run("ping", detail::cb);
+}
+```
+Можно чуть более кратко
+```cpp
+void async_main() {
+    run("ping", [](bool ok, string result) {
+        if (ok) {
+            log(result);
+            async_main();
+        }
+    });
 }
 ```
 
@@ -492,7 +610,7 @@ Future<void> func(QWebSocket* ws) {
 
 ### Длинная последовательность действий
 ```cpp
-Session sess;
+Session sess; //move-only type
 Session::Impl* d = sess.d.get();
 //...
 //...
@@ -629,17 +747,62 @@ struct Action {
 Поэтому нашему классу `task<T>` понадобится некий способ остановить исполнения и не вызываеть `handle.resume()`.
 И это мы еще не синхронизируем взаимодействие между потоков. Корутины чисто в одном потоке уже удобны
 
-## Execution context
-
-// TODO
-
-### Их можно объединить!
-
-// TODO
 
 ## Отменяемость
 
-// TODO
+Связано с прошлым пунктом.
+
+```cpp
+struct Worker : std::enable_shared_from_this<Worker> {
+    void run() {
+        longTask([self = weak_from_this()]{ //shared_from_this
+            if (auto worker = self.lock()) {
+                worker->onDone();
+            }
+        });
+    }
+    void onDone() {
+        //...
+    }
+}
+```
+
+## Execution context
+
+```cpp
+void job(Callback callback) {
+    std::thread thread([=]{
+        auto result = longTask();
+        callback(result);
+    });
+    thread.detach();
+}
+```
+
+### Их можно объединить!
+
+Пример для куобъектов
+```cpp
+class QObjExecutor final : public fut::Executor
+{
+    QPointer<QObject> context;
+public:
+    QObjExecutor(QObject* ctx) :
+        ctx(context)
+    {}
+    void Execute(Job job) noexcept override {
+        auto ctx = context.data();
+        if (!ctx) {
+            return;
+        }
+        if (QThread::currentThread() != ctx->thread()) {
+            QMetaObject::invokeMethod(ctx, job, Qt::QueuedConnection);
+        } else {
+            job();
+        }
+    }
+};
+```
 
 ## promise.await_transform
 
@@ -694,16 +857,38 @@ task async_run(string const& request) {
     co_return future;
 }
 ```
+### Что за pointer
+
+```cpp
+struct coroutine_frame // <-- pointer*
+{
+    void (*resume)(coroutine_frame *);
+    promise_type promise; // <-- promise
+    int16_t state;
+    bool heap_allocated;
+    // args
+    // locals
+    //...
+};
+```
 
 ### Suspend-less way (more verbose and intrusive)
 Универсальный способ, если мы не управляем кодом promise. Минус - оверхед от `suspend`
 ```cpp
 struct co_get_handle {};
+struct give : std::suspend_never {
+    handle handle;
+    handle await_resume() {
+        return handle;
+    }
+};
 struct promise
 {
     // ...
-    std::couroutine_handle<promise> await_transform(co_get_handle) {
-        return std::couroutine_handle<promise>::from_promise(*this)
+    using handle = std::couroutine_handle<promise>;
+    // must return awaitable
+    give await_transform(co_get_handle) {
+        return {handle::from_promise(*this)};
     }
 };
 // ACHTUNG: https://stackoverflow.com/questions/76110225/why-is-promise-typeawait-transform-greedy
