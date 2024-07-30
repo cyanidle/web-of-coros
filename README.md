@@ -150,6 +150,13 @@ struct coroutine {
     awaitable operator co_await(); // Либо сам является awaitable
 }
 ```
+Либо
+```cpp
+template<>
+struct std::coroutine_traits<coroutine> {
+    using promise_type = promise;
+};
+```
 ```cpp
 struct promise {
     coroutine get_return_object();
