@@ -122,15 +122,6 @@ TODO: картинки!
 
 Для того чтобы начать понимание того, как все таки использовать корутины, а также интегрировать чужие начнем с простого - создадим обертку для следующей функции.
 
-```cpp
-void run(string request, std::function<void(bool ok, string result)> cb);
-
-??? run_async(string request) {
-    ???
-}
-```
-
-
 Стандарт С++20 позволяет определить `coroutine_type` - объект, который являсь значением, возвращаемым из функции определеить ее как корутину.
 
 Для этого **обязательно**:
@@ -330,9 +321,7 @@ task async_main() {
     }
 }
 ```
-Напомню чего мы избегаем
-+: явная стейт машина
--: спаггети
+Аналог на коллбеках
 ```cpp
 void async_main();
 namespace detail {
@@ -672,13 +661,10 @@ static Future<void> populateCleanups(cache::CleanupParams params, Dirs& dirs) {
     assert(!dirs.empty());
     auto level = std::move(dirs.back());
     dirs.pop_back();
-    std::vector<Future<void>> levelFuts;
-    for (auto& dir: level) {
-        levelFuts.push_back(doCleanup(params, dir));
-    }
     return Gather(std::move(levelFuts))
         .Then(fut::Sync, [MV(dirs), MV(params)]() mutable {
             if (dirs.empty()) {
+                // Приходится костылить, чтобы совпадал возвращаемый тип
                 return fut::Resolved();
             } else {
                 return populateCleanups(params, dirs);
@@ -686,7 +672,30 @@ static Future<void> populateCleanups(cache::CleanupParams params, Dirs& dirs) {
         });
 }
 ```
-
+```cpp
+// Не нужно оборачивать в try-catch!
+Future<void> FileSystemCache::Cleanup(const cache::CleanupParams &params){
+    Dirs dirs;
+    auto iter = std::filesystem::recursive_directory_iterator(cacheDir);
+    auto end = std::filesystem::recursive_directory_iterator();
+    for (;iter != end; ++iter) {
+        if (iter->is_directory()) {
+            size_t depth = size_t(iter.depth());
+            if (dirs.size() <= depth) {
+                dirs.resize(depth + 1);
+            }
+            dirs[depth].push_back(Path(iter->path()));
+        }
+    }
+    for (auto it = dirs.rbegin(); it != dirs.rend(); ++it) {
+        std::vector<Future<void>> levelFuts;
+        for (auto& dir: level) {
+            levelFuts.push_back(doCleanup(params, dir));
+            co_await Gather(levelFuts);
+        }
+    }
+}
+```
 
 
 ## Undefined Behaviour (наше любимое)
