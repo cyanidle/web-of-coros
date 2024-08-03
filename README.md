@@ -1,3 +1,5 @@
+This should be refactored. WIP in [plan](/Plan.md)
+
 # В паутине корутин
 
 ## Зачем
