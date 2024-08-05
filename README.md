@@ -132,27 +132,28 @@ TODO: картинки!
 3) возможность получить из `coroutine_type` => `awaitable`
 
 ```cpp
-coroutine my_function() {
+coroutine<int> my_function() {
     co_return 1; // co_yield / co_await
 }
 ```
 ```cpp
 template<typename T>
-struct coroutine {
+struct coroutine_type {
     using promise_type = promise;
     awaitable operator co_await(); // Либо сам является awaitable
 }
-```
-Либо
-```cpp
+
 template<>
 struct std::coroutine_traits<coroutine> {
     using promise_type = promise;
 };
 ```
+Либо
 ```cpp
-struct promise {
-    coroutine get_return_object();
+```
+```cpp
+struct promise_type {
+    coroutine_type get_return_object();
     awaitable initial_suspend() noexcept;
     awaitable final_suspend() noexcept;
 
@@ -161,12 +162,6 @@ struct promise {
     void return_void() {} // Либо эта
 
     void unhandled_exception() {} // вызывается внутри catch-блока.
-
-    // Advanced:
-    T await_transform(<expr>);
-    static coroutine get_return_object_on_allocation_failure();
-    void* operator new(std::size_t n) noexcept;
-    awaitable yield_value(T&& value);
 }
 ```
 ```cpp
@@ -174,6 +169,13 @@ struct awaitable {
     bool await_ready();
     bool await_suspend();
     T await_resume(); // may throw exceptions
+};
+
+struct std::coroutine_handle {
+    void resume();
+    void destroy();
+    bool done();
+    operator bool();
 };
 ```
 
@@ -196,8 +198,6 @@ void doMultiStepTask(std::function<void(bool ok)> callback) {
         }
         run("SET another", [=](bool ok, string result){
             if (!ok) {
-                // <breakpoint>
-                // doMultiStepTask(std::__1::function<void, bool>)::<lambda1>::operator()(bool, std::basic_string<char>)::<lambda2>::operator()(bool, std::basic_string<char>)
                 handle_error(result);
                 return;
             }
@@ -609,46 +609,38 @@ Future<void> func(QWebSocket* ws) {
 ### Длинная последовательность действий
 ```cpp
 Session sess; //move-only type
-Session::Impl* d = sess.d.get();
 //...
-//...
-return WaitSignal(d->ws, &QWebSocket::connected, d->ws, 5000)
-    .ThenSync([d]{
-        return d->initSession();
+return WaitSignal(d->ws, &QWebSocket::connected)
+    .ThenSync([???]{
+        return sess->init();
     })
-    .ThenSync([d](Session result){
-        return d->handleSession(result);
+    .ThenSync([???](Session result){
+        return sess->handle(result);
     })
-    .ThenSync([MV(sess)]() mutable { //forced to use mutable lambda
-        // const-correctnes in callback hell is pretty difficult!
-        return std::move(sess);
+    .ThenSync([???]() mutable {
+        return sess;
     });
 ```
 ```cpp
 Session sess;
 //...
-//...
-co_await WaitSignal(sess.d->ws, &QWebSocket::connected, sess.d->ws, 5000);
-auto result = co_await sess.d->initSession();
-co_await sess.d->handleSession(result);
+co_await WaitSignal(sess.d->ws, &QWebSocket::connected);
+auto result = co_await sess.init();
+co_await sess.handle(result);
 co_return sess; //auto move
 ```
 
 ### Циклы
 ```cpp
-Future<void> FileSystemCache::Cleanup(const cache::CleanupParams &params) try {
-    Dirs dirs;
-    auto iter = std::filesystem::recursive_directory_iterator(cacheDir);
-    auto end = std::filesystem::recursive_directory_iterator();
-    for (;iter != end; ++iter) {
-        if (iter->is_directory()) {
-            size_t depth = size_t(iter.depth());
-            if (dirs.size() <= depth) {
-                dirs.resize(depth + 1);
-            }
-            dirs[depth].push_back(Path(iter->path()));
-        }
+Future<void> FileSystemCache::Cleanup() {
+    Dirs dirs = collectDirs()    while(!dirs.empty()) {
+        auto level = popOneLevel(dirs);
+        co_await Gather(level);
     }
+}
+
+Future<void> FileSystemCache::Cleanup() try {
+    Dirs dirs = collectDirs()
     if (!dirs.empty()) {
         return populateCleanups(params, dirs);
     } else {
@@ -659,12 +651,10 @@ Future<void> FileSystemCache::Cleanup(const cache::CleanupParams &params) try {
 }
 ```
 ```cpp
-static Future<void> populateCleanups(cache::CleanupParams params, Dirs& dirs) {
-    assert(!dirs.empty());
-    auto level = std::move(dirs.back());
-    dirs.pop_back();
-    return Gather(std::move(levelFuts))
-        .Then(fut::Sync, [MV(dirs), MV(params)]() mutable {
+static Future<void> populateCleanups(Dirs& dirs) {
+    auto level = popOneLevel(dirs);
+    return Gather(level)
+        .Then([dirs = std::move(dirs)]() mutable {
             if (dirs.empty()) {
                 // Приходится костылить, чтобы совпадал возвращаемый тип
                 return fut::Resolved();
